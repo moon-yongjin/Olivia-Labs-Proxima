@@ -309,7 +309,9 @@ class BrowserManager {
                     Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
 
                     // 2. Remove Electron globals
-                    const electronGlobals = ['process', 'require', 'module', '__filename', '__dirname', 'global', 'Buffer'];
+                    // Note: 'global' and 'Buffer' removed — sandbox:true already blocks them,
+                    // and the defineProperty trap breaks polyfills (e.g. Claude's Buffer.isBuffer)
+                    const electronGlobals = ['process', 'require', 'module', '__filename', '__dirname'];
                     electronGlobals.forEach(g => {
                         try { delete window[g]; } catch(e) {}
                         try { Object.defineProperty(window, g, { get: () => undefined, configurable: true }); } catch(e) {}
