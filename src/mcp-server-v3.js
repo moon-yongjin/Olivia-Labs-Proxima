@@ -142,7 +142,7 @@ function getEnabledProviders() {
     } catch (e) {
         console.error('[MCP] Error reading enabled providers:', e);
     }
-    return new Set(['perplexity', 'chatgpt', 'gemini']);
+    return new Set(['perplexity', 'chatgpt', 'gemini', 'grok']);
 }
 
 function isProviderEnabled(provider) {
@@ -359,6 +359,16 @@ class AIProvider {
         return result;
     }
 
+    async animate() {
+        await this.ensureInitialized();
+        return await this.ipc.send('grokAnimate', this.name);
+    }
+
+    async relayImage(imageUrl) {
+        await this.ensureInitialized();
+        return await this.ipc.send('relayImage', this.name, { url: imageUrl });
+    }
+
     // Legacy chat method (without typing detection)
     async chatSimple(message, useCache = true) {
         if (useCache && this.cache.has(message)) {
@@ -456,8 +466,9 @@ const perplexity = new AIProvider('perplexity', ipcClient);
 const chatgpt = new AIProvider('chatgpt', ipcClient);
 const claude = new AIProvider('claude', ipcClient);
 const gemini = new AIProvider('gemini', ipcClient);
+const grok = new AIProvider('grok', ipcClient);
 
-const router = new SmartRouter({ perplexity, chatgpt, claude, gemini });
+const router = new SmartRouter({ perplexity, chatgpt, claude, gemini, grok });
 
 // Create MCP Server
 const server = new McpServer({
@@ -1548,6 +1559,129 @@ server.resource(
                 }, null, 2)
             }]
         };
+    }
+);
+
+server.tool(
+    'grok_animate',
+    {},
+    async () => {
+        const disabled = checkDisabled('grok');
+        if (disabled) return disabled;
+        try {
+            console.error('[MCP] Triggering Grok animate...');
+            const result = await grok.animate();
+            return toolResponse({
+                success: result.clicked !== false,
+                ...result,
+                timestamp: new Date().toISOString()
+            });
+        } catch (err) {
+            return toolError(err);
+        }
+    }
+);
+
+server.tool(
+    'generate_image',
+    {
+        prompt: z.string().describe('Image generation prompt'),
+        animate: z.boolean().optional().default(false).describe('Whether to also convert to video using Grok Animate'),
+        forceProvider: z.string().optional().describe('Force a specific provider: grok, chatgpt. Default: auto-detect')
+    },
+    async ({ prompt, animate, forceProvider }) => {
+        const hasKorean = /[\uac00-\ud7a3]/.test(prompt);
+        const useGrok = checkDisabled('grok');
+        const useChatGPT = checkDisabled('chatgpt');
+
+        // Determine routing strategy
+        let strategy = forceProvider || (hasKorean ? 'chatgpt' : 'grok');
+        if (strategy === 'grok' && useGrok) strategy = 'chatgpt';
+        if (strategy === 'chatgpt' && useChatGPT) strategy = 'grok';
+
+        console.error(`[generate_image] Korean detected: ${hasKorean}, Strategy: ${strategy}`);
+
+        try {
+            let result;
+            if (hasKorean && !forceProvider) {
+                // Korean text: send to BOTH simultaneously, use first result
+                console.error('[generate_image] Korean text detected — sending to both Grok & ChatGPT simultaneously');
+                const [grokResult, chatgptResult] = await Promise.allSettled([
+                    grok.chat(`Generate this image: ${prompt}. Output ONLY the image, no text.`),
+                    chatgpt.chat(`이미지를 생성해줘. 한글 텍스트 정확하게 포함해서: ${prompt}`)
+                ]);
+
+                const grokOk = grokResult.status === 'fulfilled';
+                const chatGptOk = chatgptResult.status === 'fulfilled';
+
+                result = {
+                    grok: grokOk ? grokResult.value : { error: grokResult.reason?.message },
+                    chatgpt: chatGptOk ? chatgptResult.value : { error: chatgptResult.reason?.message },
+                    strategy: 'parallel-korean'
+                };
+            } else {
+                // Standard route (Grok primary)
+                const response = strategy === 'grok'
+                    ? await grok.chat(`Generate this image: ${prompt}`)
+                    : await chatgpt.chat(`Generate this image: ${prompt}`);
+                result = { [strategy]: response, strategy };
+            }
+
+            // Optionally trigger Grok Animate after generation
+            if (animate && !checkDisabled('grok')) {
+                console.error('[generate_image] animate=true, waiting 3s then triggering Grok Animate...');
+                await new Promise(r => setTimeout(r, 3000));
+                const animResult = await grok.animate();
+                result.animate = animResult;
+            }
+
+            return toolResponse({
+                success: true,
+                prompt,
+                hasKorean,
+                ...result,
+                timestamp: new Date().toISOString()
+            });
+        } catch (err) {
+            return toolError(err);
+        }
+    }
+);
+
+server.tool(
+    'relay_to_grok_video',
+    {
+        imageUrl: z.string().describe('The URL of the image to relay (e.g. from ChatGPT or Gemini)'),
+        animate: z.boolean().optional().default(true).describe('Whether to click Animate button after relaying the image')
+    },
+    async ({ imageUrl, animate }) => {
+        const disabled = checkDisabled('grok');
+        if (disabled) return disabled;
+        try {
+            console.error(`[MCP] Relaying image to Grok: ${imageUrl.substring(0, 50)}...`);
+            const relayResult = await grok.relayImage(imageUrl);
+            
+            if (relayResult.success) {
+                let animResult = null;
+                if (animate) {
+                    console.error('[MCP] Waiting for upload before animating...');
+                    await new Promise(r => setTimeout(r, 3000)); // Wait for Grok to process upload
+                    animResult = await grok.animate();
+                }
+                
+                return toolResponse({
+                    success: true,
+                    message: 'Image successfully relayed to Grok',
+                    animateTriggered: animate,
+                    animResult,
+                    timestamp: new Date().toISOString()
+                });
+            } else {
+                return toolError(relayResult.error || 'Relay failed');
+            }
+        } catch (err) {
+            return toolError(err);
+        }
     }
 );
 

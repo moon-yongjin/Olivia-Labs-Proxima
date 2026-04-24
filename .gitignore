@@ -1,39 +1,42 @@
-# Dependencies
-node_modules/
-
-# Build output
-dist/
-
 # OS files
 .DS_Store
 Thumbs.db
 
-# Editor files
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Logs
-*.log
+# Node dependencies
+node_modules/
 npm-debug.log*
 
-# Environment files
+# User Session & Cookies (CRITICAL: DO NOT PUSH)
+session_data/
+cookies/
+UserData/
+.session/
+*.cookie
+cache/
+Local Storage/
+Session Storage/
+
+# Sensitive Configs
 .env
-.env.local
-.env.*.local
+config.json
+secret.json
 
-# User data (sessions, settings)
-src/enabled-providers.json
+# Logs & Temp files
+*.log
+tmp/
+temp/
+/downloads/
 
-# Python SDK cache
-sdk/__pycache__/
-*.pyc
+# Python environment
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env/
 
-# Session & cookie data
-*.session
-cookies-backup/
-
-# Temporary files
-*.tmp
-*.temp
+# Build artifacts
+dist/
+build/
+out/

@@ -103,8 +103,9 @@ function getProviderInterceptorScript(provider) {
                         }
                     } catch(e) {
                         // Might be raw text chunk
-                        var rawData = line.slice(6).trim();
-                        if (rawData && rawData !== '[DONE]' && rawData.length > 10) {
+                        if (rawData.trim() === '[DONE]') {
+                            window.__proxima_is_streaming = false;
+                        } else if (rawData.length > 10) {
                             fullText += rawData;
                         }
                     }
@@ -130,6 +131,8 @@ function getProviderInterceptorScript(provider) {
                         // Alternative format
                         if (data.text) fullText = data.text;
                         if (data.modelOutput) fullText = data.modelOutput;
+                        // Completion marker
+                        if (data.isFinished) window.__proxima_is_streaming = false;
                     } catch(e) {
                         // Gemini sometimes sends raw JSON arrays
                         var raw = line.trim();
@@ -168,6 +171,35 @@ function getProviderInterceptorScript(provider) {
                             }
                         }
                     } catch(e3) {}
+                }
+            `
+        },
+        grok: {
+            name: 'Grok',
+            urlPatterns: `url.includes('/rest/app/chat') || url.includes('/v1/chat') || (url.includes('grok') && method === 'POST')`,
+            streamTypes: `contentType.includes('text/event-stream') || contentType.includes('stream') || contentType.includes('application/json')`,
+            parser: `
+                // Grok SSE format or JSON
+                if (line.startsWith('data: ') && line.slice(6).trim() !== '[DONE]') {
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        // Grok/OpenAI format: choices[0].delta.content
+                        if (data.choices && data.choices[0] && data.choices[0].delta && data.choices[0].delta.content) {
+                            fullText += data.choices[0].delta.content;
+                        }
+                        // Alternative format
+                        if (data.token && data.token.text) fullText += data.token.text;
+                        if (data.text) fullText += data.text;
+                    } catch(e) {}
+                } else if (!line.startsWith('data:') && line.trim().length > 10) {
+                    try {
+                        if (data.text) fullText = raw.text;
+                        if (data.content) fullText = raw.content;
+                    } catch(e) {}
+                }
+                // Global completion marker
+                if (line.includes('[DONE]') || line.includes('"finish_reason":"stop"')) {
+                    window.__proxima_is_streaming = false;
                 }
             `
         }
@@ -289,12 +321,20 @@ class BrowserManager {
                 url: 'https://gemini.google.com/app',
                 partition: 'persist:gemini',
                 color: '#4285f4'
+            },
+            grok: {
+                url: 'https://grok.com/',
+                partition: 'persist:grok',
+                color: '#000000'
             }
         };
 
         // Match the exact Chrome version that ships with Electron 33 (Chromium 130)
         this.chromeVersion = '130.0.0.0';
-        this.userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${this.chromeVersion} Safari/537.36`;
+        this.isMac = process.platform === 'darwin';
+        this.userAgent = this.isMac
+            ? `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${this.chromeVersion} Safari/537.36`
+            : `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${this.chromeVersion} Safari/537.36`;
     }
 
     /**
@@ -337,10 +377,11 @@ class BrowserManager {
                     if (!window.chrome.loadTimes) window.chrome.loadTimes = function() { return { commitLoadTime: Date.now()/1000, connectionInfo: 'h2', finishDocumentLoadTime: Date.now()/1000, finishLoadTime: Date.now()/1000, firstPaintAfterLoadTime: 0, firstPaintTime: Date.now()/1000, navigationType: 'Other', npnNegotiatedProtocol: 'h2', requestTime: Date.now()/1000, startLoadTime: Date.now()/1000, wasAlternateProtocolAvailable: false, wasFetchedViaSpdy: true, wasNpnNegotiated: true }; };
 
                     // 4. Navigator spoofing
+                    const isMac = ${this.isMac};
                     const navProps = {
-                        platform: 'Win32',
+                        platform: isMac ? 'MacIntel' : 'Win32',
                         vendor: 'Google Inc.',
-                        languages: ['en-US', 'en'],
+                        languages: ['ko-KR', 'ko', 'en-US', 'en'],
                         hardwareConcurrency: navigator.hardwareConcurrency || 8,
                         deviceMemory: 8,
                         maxTouchPoints: 0,
@@ -354,9 +395,11 @@ class BrowserManager {
                         Object.defineProperty(navigator, 'plugins', {
                             get: () => {
                                 const arr = [
-                                    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-                                    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-                                    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+                                    { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                                    { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                                    { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                                    { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                                    { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
                                 ];
                                 arr.item = (i) => arr[i];
                                 arr.namedItem = (name) => arr.find(p => p.name === name);
@@ -377,12 +420,12 @@ class BrowserManager {
                         const uad = {
                             brands,
                             mobile: false,
-                            platform: "Windows",
+                            platform: isMac ? "macOS" : "Windows",
                             getHighEntropyValues: (hints) => Promise.resolve({
                                 brands,
                                 mobile: false,
-                                platform: "Windows",
-                                platformVersion: "15.0.0",
+                                platform: isMac ? "macOS" : "Windows",
+                                platformVersion: isMac ? "14.6.0" : "15.0.0",
                                 architecture: "x86",
                                 bitness: "64",
                                 model: "",
@@ -394,7 +437,7 @@ class BrowserManager {
                                 ],
                                 wow64: false
                             }),
-                            toJSON: function() { return { brands, mobile: false, platform: "Windows" }; }
+                            toJSON: function() { return { brands, mobile: false, platform: isMac ? "macOS" : "Windows" }; }
                         };
                         Object.defineProperty(navigator, 'userAgentData', { get: () => uad, configurable: true });
                     } catch(e) {}
@@ -414,14 +457,14 @@ class BrowserManager {
                     try {
                         const getParam = WebGLRenderingContext.prototype.getParameter;
                         WebGLRenderingContext.prototype.getParameter = function(param) {
-                            if (param === 37445) return 'Google Inc. (NVIDIA)';
-                            if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                            if (param === 37445) return 'Google Inc. (Apple)';
+                            if (param === 37446) return 'ANGLE (Apple, Apple M1, OpenGL 4.1)';
                             return getParam.call(this, param);
                         };
                         const getParam2 = WebGL2RenderingContext.prototype.getParameter;
                         WebGL2RenderingContext.prototype.getParameter = function(param) {
-                            if (param === 37445) return 'Google Inc. (NVIDIA)';
-                            if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                            if (param === 37445) return 'Google Inc. (Apple)';
+                            if (param === 37446) return 'ANGLE (Apple, Apple M1, OpenGL 4.1)';
                             return getParam2.call(this, param);
                         };
                     } catch(e) {}
@@ -465,8 +508,8 @@ class BrowserManager {
             // Set proper Chrome client hints for EVERY request
             headers['sec-ch-ua'] = `"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"`;
             headers['sec-ch-ua-mobile'] = '?0';
-            headers['sec-ch-ua-platform'] = '"Windows"';
-            headers['sec-ch-ua-platform-version'] = '"15.0.0"';
+            headers['sec-ch-ua-platform'] = this.isMac ? '"macOS"' : '"Windows"';
+            headers['sec-ch-ua-platform-version'] = this.isMac ? '"14.6.0"' : '"15.0.0"';
             headers['sec-ch-ua-full-version-list'] = `"Chromium";v="130.0.6723.191", "Google Chrome";v="130.0.6723.191", "Not?A_Brand";v="99.0.0.0"`;
             headers['sec-ch-ua-arch'] = '"x86"';
             headers['sec-ch-ua-bitness'] = '"64"';
@@ -496,8 +539,14 @@ class BrowserManager {
                 callback({});
             }
         });
-
         return ses;
+    }
+
+    /**
+     * Get list of currently initialized/active providers
+     */
+    getInitializedProviders() {
+        return Array.from(this.views.keys());
     }
 
     /**

@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# Proxima MCP Registration Helper
+# Run this script to get the config for your AI editor (Cursor, VS Code, etc.)
+
+PROXIMA_DIR="$(cd "$(dirname "$0")" && pwd)"
+MCP_PATH="${PROXIMA_DIR}/src/mcp-server-v3.js"
+
+echo "--------------------------------------------------"
+echo "⚡ Proxima MCP Registration"
+echo "--------------------------------------------------"
+echo ""
+echo "Below is the JSON configuration for your AI editor."
+echo "Add this to your mcpServers setting."
+echo ""
+echo "MCP Server Path: ${MCP_PATH}"
+echo ""
+echo "--------------------------------------------------"
+echo "JSON SNIPPET:"
+echo "--------------------------------------------------"
+echo "{"
+echo "  \"mcpServers\": {"
+echo "    \"proxima\": {"
+echo "      \"command\": \"node\","
+echo "      \"args\": [\"${MCP_PATH}\"]"
+echo "    }"
+echo "  }"
+echo "}"
+echo "--------------------------------------------------"
+echo ""
+echo "👉 Instructions:"
+echo "1. Open Cursor/VS Code Settings."
+echo "2. Search for 'MCP' or 'Feature' -> 'MCP'."
+echo "3. Add a new server named 'proxima'."
+echo "4. Use the values above."
+echo ""
+echo "⚠️  Note: Make sure Proxima App is RUNNING and you are logged in."

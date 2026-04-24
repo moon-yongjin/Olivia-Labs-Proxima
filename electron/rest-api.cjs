@@ -27,6 +27,9 @@ const MODEL_ALIASES = {
     // Perplexity
     'perplexity': 'perplexity', 'pplx': 'perplexity', 'sonar': 'perplexity',
 
+    // Grok
+    'grok': 'grok', 'xai': 'grok',
+
     // Special
     'auto': 'auto',   // Auto-pick best available
     'all': 'all'       // Query all providers
@@ -185,7 +188,7 @@ function pickBestProvider(preferred) {
         if (enabled.includes(preferred)) return preferred;
         return null;
     }
-    return ['claude', 'chatgpt', 'gemini', 'perplexity'].find(p => enabled.includes(p)) || null;
+    return ['claude', 'chatgpt', 'gemini', 'perplexity', 'grok'].find(p => enabled.includes(p)) || null;
 }
 
 function extractMessage(body) {
@@ -377,7 +380,7 @@ function getDocsPage() {
             <div class="logo">⚡ Proxima API</div>
             <p class="sub">Unified AI Gateway · Port ${REST_PORT} · v${VERSION}</p>
             <div class="chips">
-                ${['perplexity', 'chatgpt', 'claude', 'gemini'].map(p =>
+                ${['perplexity', 'chatgpt', 'claude', 'gemini', 'grok'].map(p =>
         `<div class="chip ${enabled.includes(p) ? 'on' : 'off'}"><div class="d"></div>${p[0].toUpperCase() + p.slice(1)}</div>`
     ).join('')}
             </div>
@@ -423,6 +426,7 @@ POST /v1/chat/completions
                 <div class="model-item" style="border:1px solid rgba(249,115,22,.15)">claude · sonnet · anthropic</div>
                 <div class="model-item" style="border:1px solid rgba(59,130,246,.15)">gemini · google · bard</div>
                 <div class="model-item" style="border:1px solid rgba(168,85,247,.15)">perplexity · pplx · sonar</div>
+                <div class="model-item" style="border:1px solid rgba(255,255,255,.15)">grok · xai</div>
                 <div class="model-item">auto → best available</div>
             </div>
         </div>
@@ -612,20 +616,33 @@ async function handleRoute(method, pathname, body, res) {
     // /v1/models
     if (method === 'GET' && pathname === `${API_PREFIX}/models`) {
         const enabled = getEnabled();
-        const models = enabled.map(p => ({
-            id: p, object: 'model', created: Math.floor(Date.now() / 1000),
-            owned_by: 'proxima', status: 'enabled',
-            aliases: Object.entries(MODEL_ALIASES).filter(([_, v]) => v === p).map(([k]) => k).filter(k => k !== p)
-        }));
-        // Also show disabled ones
-        const allProviders = ['chatgpt', 'claude', 'gemini', 'perplexity'];
-        allProviders.filter(p => !enabled.includes(p)).forEach(p => {
-            models.push({
-                id: p, object: 'model', owned_by: 'proxima', status: 'disabled',
-                aliases: Object.entries(MODEL_ALIASES).filter(([_, v]) => v === p).map(([k]) => k).filter(k => k !== p)
-            });
+        
+        // Define ALL supported providers (including new ones like grok)
+        const allPossibleProviders = ['chatgpt', 'claude', 'gemini', 'perplexity', 'grok'];
+        
+        const models = allPossibleProviders.map(p => {
+            const isEnabled = enabled.includes(p);
+            return {
+                id: p,
+                object: 'model',
+                created: Math.floor(Date.now() / 1000),
+                owned_by: 'proxima',
+                status: isEnabled ? 'enabled' : 'disabled',
+                aliases: Object.entries(MODEL_ALIASES)
+                    .filter(([_, v]) => v === p)
+                    .map(([k]) => k)
+                    .filter(k => k !== p)
+            };
         });
-        models.push({ id: 'auto', object: 'model', owned_by: 'proxima', description: 'Auto-picks best available model' });
+
+        // Add special 'auto' model
+        models.push({ 
+            id: 'auto', 
+            object: 'model', 
+            owned_by: 'proxima', 
+            description: 'Auto-picks best available model' 
+        });
+
         sendJSON(res, 200, { object: 'list', data: models });
         return;
     }

@@ -67,7 +67,7 @@ class Proxima:
 
         Args:
             message:  Your message/prompt
-            model:    "chatgpt", "claude", "gemini", "perplexity", or "auto"
+            model:    "chatgpt", "claude", "gemini", "perplexity", "grok", or "auto"
             function: None="chat", "search", "translate", "brainstorm", "code", "analyze"
 
         Extra kwargs based on function:

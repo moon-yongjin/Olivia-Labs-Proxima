@@ -11,8 +11,11 @@ const { initRestAPI, startRestAPI } = require('./rest-api.cjs');
 // These MUST be set before app is ready or any windows are created
 
 // Clean Chrome UA matching Electron 33's Chromium 130
+const IS_MAC = process.platform === 'darwin';
 const CHROME_VERSION = '130.0.6723.191';
-const CHROME_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`;
+const CHROME_UA = IS_MAC 
+    ? `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`
+    : `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION} Safari/537.36`;
 
 // 1. Set user agent at Chromium COMMAND LINE level 
 //    This affects the INTERNAL sec-ch-ua brand generation in Chromium
@@ -22,7 +25,7 @@ app.commandLine.appendSwitch('user-agent', CHROME_UA);
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 
 // 3. Disable features that leak Electron identity
-app.commandLine.appendSwitch('disable-features', 'ElectronSerialChooser,OutOfBlinkCors');
+app.commandLine.appendSwitch('disable-features', 'ElectronSerialChooser,OutOfBlinkCors,IsolateOrigins,site-per-process');
 
 // 4. Set the app-wide fallback user agent
 //    This affects navigator.userAgent AND sec-ch-ua hint headers for ALL sessions
@@ -44,13 +47,17 @@ let mainWindow;
 let browserManager;
 let ipcServer; // For MCP server communication
 
+// Global registry for REST API to see live status
+global.activeProviders = [];
+
 // Default settings
 const defaultSettings = {
     providers: {
         perplexity: { enabled: true, loggedIn: false },
         chatgpt: { enabled: true, loggedIn: false },
         claude: { enabled: false, loggedIn: false },
-        gemini: { enabled: true, loggedIn: false }
+        gemini: { enabled: true, loggedIn: false },
+        grok: { enabled: true, loggedIn: false }
     },
     ipcPort: 19222, // Port for MCP server IPC communication
     theme: 'dark',
@@ -62,6 +69,14 @@ function loadSettings() {
     try {
         if (fs.existsSync(settingsPath)) {
             const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+            // Ensure newly added providers (like grok) are added to existing settings
+            if (saved.providers) {
+                for (const p in defaultSettings.providers) {
+                    if (!saved.providers[p]) {
+                        saved.providers[p] = { ...defaultSettings.providers[p] };
+                    }
+                }
+            }
             return { ...defaultSettings, ...saved };
         }
     } catch (e) {
@@ -315,8 +330,29 @@ function createWindow() {
             // Notify renderer which provider to highlight
             mainWindow.webContents.send('set-active-provider', enabledProviders[0]);
         }
-
+        
         console.log('[Agent Hub] All providers initialized and ready!');
+        
+        // Update global registry for REST API live sync
+        global.activeProviders = enabledProviders;
+
+        // Start IPC server for MCP communication
+        startIPCServer();
+
+        // Start REST API server AFTER all providers are ready
+        try {
+            console.log('[REST API] Initializing with live provider state...');
+            initRestAPI({
+                handleMCPRequest,
+                getEnabledProviders: () => {
+                    // Global source of truth: 100% synced with live app state
+                    return global.activeProviders || [];
+                }
+            });
+            startRestAPI();
+        } catch (e) {
+            console.error('[REST API] Failed to start:', e.message);
+        }
 
         // Periodically backup cookies every 10 minutes
         setInterval(async () => {
@@ -343,28 +379,10 @@ function createWindow() {
         mainWindow = null;
     });
 
-    // Save enabled providers on startup
-    saveEnabledProviders(loadSettings());
-
-    // Start IPC server for MCP communication
-    startIPCServer();
-
-    // Start REST API server
-    try {
-        const enabledList = Object.entries(loadSettings().providers)
-            .filter(([_, c]) => c.enabled).map(([n]) => n);
-        initRestAPI({
-            handleMCPRequest,
-            getEnabledProviders: () => {
-                const s = loadSettings();
-                return Object.entries(s.providers)
-                    .filter(([_, c]) => c.enabled).map(([n]) => n);
-            }
-        });
-        startRestAPI();
-    } catch (e) {
-        console.error('[REST API] Failed to start:', e.message);
-    }
+    // Save enabled providers and sync settings on startup
+    const currentSettings = loadSettings();
+    saveSettings(currentSettings); // Ensure migrated keys (like grok) are on disk
+    saveEnabledProviders(currentSettings);
 }
 
 // IPC Server for MCP Communication
@@ -579,9 +597,85 @@ async function handleMCPRequest(request) {
                 await browserManager.navigate(provider, data.url);
                 return { success: true, provider };
 
+            case 'relayImage':
+                // Relay an image URL from one provider to another
+                try {
+                    const tempRelayPath = path.join(app.getPath('temp'), `proxima_relay_${Date.now()}.png`);
+                    await downloadImage(data.url, tempRelayPath);
+                    const uploadResult = await uploadFileToProvider(provider, tempRelayPath);
+                    // Clean up temp file
+                    setTimeout(() => { try { fs.unlinkSync(tempRelayPath); } catch(e) {} }, 30000);
+                    return { success: true, provider, uploadResult };
+                } catch (relayErr) {
+                    return { success: false, error: relayErr.message };
+                }
+
+            case 'grokAnimate':
+                // Specialized command to click "Animate" button on Grok
+                try {
+                    const animateResult = await grokAnimateLatestImage();
+                    return { success: true, provider: 'grok', ...animateResult };
+                } catch (animErr) {
+                    return { success: false, error: animErr.message };
+                }
+
             case 'newConversation':
                 await startNewConversation(provider);
                 return { success: true, provider };
+
+            case 'sendToImagine': {
+                // Navigate to Imagine tab, type prompt using OS-level input, and submit
+                const imagineWC = browserManager.getWebContents('grok');
+                if (!imagineWC) return { success: false, error: 'Grok not initialized' };
+
+                try {
+                    // Step 1: Click Imagine menu (SPA nav — no full reload)
+                    await imagineWC.executeJavaScript(`
+                        (function() {
+                            const links = document.querySelectorAll('a[href*="imagine"], a[href="/imagine"]');
+                            if (links.length > 0) { links[0].click(); return 'link'; }
+                            const els = Array.from(document.querySelectorAll('a, div[role="button"]'));
+                            const m = els.find(el => (el.textContent || '').trim().includes('Imagine'));
+                            if (m) { m.click(); return 'text'; }
+                            return 'not found';
+                        })()
+                    `);
+                    await sleep(2000);
+
+                    // Step 2: Focus editor
+                    await imagineWC.executeJavaScript(`
+                        (function() {
+                            const editor = document.querySelector('.tiptap');
+                            if (editor) { editor.focus(); return 'focused'; }
+                            return 'no editor';
+                        })()
+                    `);
+                    await sleep(300);
+
+                    // Step 3: Paste via clipboard (avoids Server Fail from char-by-char typing)
+                    const { clipboard } = require('electron');
+                    clipboard.writeText(data.prompt);
+                    await sleep(100);
+
+                    // Select all existing text and paste
+                    await imagineWC.sendInputEvent({ type: 'keyDown', keyCode: 'A', modifiers: ['meta'] });
+                    await imagineWC.sendInputEvent({ type: 'keyUp', keyCode: 'A', modifiers: ['meta'] });
+                    await sleep(100);
+                    await imagineWC.sendInputEvent({ type: 'keyDown', keyCode: 'V', modifiers: ['meta'] });
+                    await imagineWC.sendInputEvent({ type: 'keyUp', keyCode: 'V', modifiers: ['meta'] });
+                    await sleep(500);
+
+                    // Step 4: Press Enter
+                    await imagineWC.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+                    await imagineWC.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+
+                    console.log('[sendToImagine] Prompt pasted via clipboard & Enter sent!');
+                    return { success: true, provider: 'grok', submitted: true };
+                } catch (e) {
+                    return { success: false, error: e.message };
+                }
+
+            }
 
             case 'debugDOM':
                 // Debug: Inspect DOM structure to find correct selectors
@@ -708,6 +802,8 @@ async function sendMessageToProvider(provider, message) {
             return await sendToClaude(webContents, message);
         case 'gemini':
             return await sendToGemini(webContents, message);
+        case 'grok':
+            return await sendToGrok(webContents, message);
         default:
             throw new Error(`Unknown provider: ${provider}`);
     }
@@ -1084,6 +1180,49 @@ async function sendToGemini(webContents, message) {
     return { sent: true };
 }
 
+async function sendToGrok(webContents, message) {
+    console.log('[Grok] Sending message...');
+
+    // Step 1: Find and focus the input
+    const inputFound = await webContents.executeJavaScript(`
+        (function() {
+            const selectors = [
+                'textarea[placeholder*="Grok"]',
+                'textarea[placeholder*="Ask"]',
+                '[contenteditable="true"]',
+                'textarea'
+            ];
+            
+            for (const selector of selectors) {
+                const input = document.querySelector(selector);
+                if (input) {
+                    input.focus();
+                    input.click();
+                    return { found: true, selector: selector };
+                }
+            }
+            return { found: false };
+        })()
+    `);
+
+    if (!inputFound.found) {
+        return { sent: false, error: 'No input field found' };
+    }
+
+    await sleep(300);
+
+    // Step 2: Use standard typing logic
+    await typeIntoPage(webContents, message);
+    await sleep(300);
+
+    // Step 3: Send with Enter key
+    await webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+    await webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+
+    console.log('[Grok] Enter key sent');
+    return { sent: true };
+}
+
 // Wait for send button to be visible and enabled (after file upload)
 async function waitForSendButtonReady(provider) {
     const webContents = browserManager.getWebContents(provider);
@@ -1268,6 +1407,18 @@ async function getResponseWithTypingStatus(provider) {
                 })()
             `).catch(() => '');
             console.log(`[Gemini] Captured old response fingerprint: ${oldFp.substring(0, 50)}...`);
+        } else if (provider === 'grok') {
+            const oldFp = await webContents.executeJavaScript(`
+                (function() {
+                    const msgs = document.querySelectorAll('[data-testid="message-row"], [class*="message-content"], .prose');
+                    if (msgs.length > 0) {
+                        return msgs[msgs.length - 1].textContent.substring(0, 200).trim();
+                    }
+                    return '';
+                })()
+            `).catch(() => '');
+            global.grokOldFingerprint = oldFp;
+            console.log(`[Grok] Captured old response fingerprint: ${oldFp.substring(0, 50)}...`);
         }
     } catch (e) {
         console.error(`[getResponseWithTyping] Error capturing old fingerprint for ${provider}:`, e.message);
@@ -1292,7 +1443,7 @@ async function getProviderResponse(provider, customSelector = null) {
     // Fast path: grab from network interceptor instead of waiting for DOM
 
     const maxWaitSeconds = (provider === 'claude') ? 600 : 120; // 5 min Claude, 2 min others
-    const maxPolls = maxWaitSeconds * 2; // polling every 500ms
+    const maxPolls = maxWaitSeconds * 10; // polling every 100ms (was 500ms)
     let networkGotResponse = false;
 
     console.log(`[getProviderResponse] ⚡ ${provider}: Network interceptor polling (fast path)...`);
@@ -1337,20 +1488,20 @@ async function getProviderResponse(provider, customSelector = null) {
             // If no stream activity after 2 seconds, fall back to DOM quickly
             // (Gemini/Perplexity don't use fetch, so interceptor won't capture them)
             // Also handles case where interceptor matched URL but parser failed (ChatGPT)
-            if (i > 3 && !status.isStreaming && status.response.length === 0) {
-                console.log(`[getProviderResponse] ${provider}: No usable stream data after ${i * 0.5}s, trying DOM fallback`);
+            if (i > 20 && !status.isStreaming && status.response.length === 0) {
+                console.log(`[getProviderResponse] ${provider}: No usable stream data after ${i * 0.1}s, trying DOM fallback`);
                 break;
             }
 
         } catch (e) {
             // webContents might be navigating, retry
-            if (i > 40) {
+            if (i > 100) {
                 console.log(`[getProviderResponse] ${provider}: Interceptor error, falling back to DOM`);
                 break;
             }
         }
 
-        await sleep(500);
+        await sleep(100);
     }
 
     // Slow path: DOM scraping fallback (interceptor missed or not installed)
@@ -1386,7 +1537,7 @@ async function getProviderResponse(provider, customSelector = null) {
         } catch (e) { }
 
         // Small delay for DOM to settle (Perplexity needs more time for math/LaTeX rendering)
-        await sleep((provider === 'claude' || provider === 'perplexity') ? 1500 : 500);
+        await sleep((provider === 'claude' || provider === 'perplexity') ? 600 : 200);
 
         // One more try — maybe interceptor caught it while DOM was settling
         try {
@@ -1525,6 +1676,25 @@ async function getProviderResponse(provider, customSelector = null) {
                                     markdown += '[' + text + '](' + href + ')';
                                 } else {
                                     markdown += text;
+                                }
+                            }
+
+                            // Images (CRITICAL for Grok image generation)
+                            if (tag === 'img') {
+                                const src = node.getAttribute('src') || node.getAttribute('data-src');
+                                const alt = node.getAttribute('alt') || 'Image';
+                                // Filter out small icons or tracking pixels
+                                if (src && !src.startsWith('data:') && !src.includes('avatar') && !src.includes('icon')) {
+                                    markdown += NL + NL + '![' + alt + '](' + src + ')' + NL + NL;
+                                }
+                                continue;
+                            }
+
+                            // Video (For Grok Image-to-Video generation)
+                            if (tag === 'video') {
+                                const src = node.getAttribute('src') || node.querySelector('source')?.getAttribute('src');
+                                if (src && !src.startsWith('data:')) {
+                                    markdown += NL + NL + '📽 **Video Generated**: ' + src + NL + NL;
                                 }
                                 continue;
                             }
@@ -1957,6 +2127,38 @@ async function getProviderResponse(provider, customSelector = null) {
                         if (markdown && markdown.length > 0) return markdown;
                     }
                 }
+
+                // Grok specific
+                if (host.includes('grok')) {
+                    const messageRows = document.querySelectorAll('[data-testid="message-row"]');
+                    if (messageRows.length > 0) {
+                        // Find the last assistant message row
+                        // Assistant messages usually don't have user-specific attributes
+                        let lastAssistantRow = null;
+                        for (let j = messageRows.length - 1; j >= 0; j--) {
+                            const row = messageRows[j];
+                            // Simple heuristic: if it doesn't contain a specific user id or is the second of a pair
+                            // Better: look for message-content that isn't from the user
+                            const content = row.querySelector('[class*="message-content"], .prose, .markdown');
+                            if (content) {
+                                lastAssistantRow = row;
+                                break;
+                            }
+                        }
+                        
+                        if (lastAssistantRow) {
+                            const markdown = cleanMarkdown(domToMarkdown(lastAssistantRow));
+                            if (markdown && markdown.length > 0) return markdown;
+                        }
+                    }
+                    
+                    // Fallback to any prose/markdown in the main area
+                    const contents = document.querySelectorAll('.prose, .markdown, [class*="message-content"]');
+                    if (contents.length > 0) {
+                        const lastContent = contents[contents.length - 1];
+                        return cleanMarkdown(domToMarkdown(lastContent));
+                    }
+                }
                 
                 return '';
             })()
@@ -2181,6 +2383,21 @@ async function isAITyping(provider) {
                     }
                     if (matSpinner && matSpinner.offsetParent !== null) {
                         return { isTyping: true, provider: 'gemini' };
+                    }
+                }
+
+                // Grok typing detection
+                if (host.includes('grok')) {
+                    // Grok has a stop button/icon during generation
+                    const stopButton = document.querySelector('button[aria-label*="Stop"], [class*="stop-icon"], [class*="cancel"]');
+                    // Check for standard loading/pulsing classes in Grok's UI
+                    const pulsingDots = document.querySelector('[class*="loading"], [class*="generating"], .animate-pulse');
+                    
+                    if (stopButton && stopButton.offsetParent !== null) {
+                        return { isTyping: true, provider: 'grok' };
+                    }
+                    if (pulsingDots && pulsingDots.offsetParent !== null) {
+                        return { isTyping: true, provider: 'grok' };
                     }
                 }
                 
@@ -2691,11 +2908,29 @@ async function uploadFileToProvider(provider, filePath) {
                 // Perplexity: Click attach button first, then find file input
                 attachButton = document.querySelector('button[aria-label*="Attach"], button[aria-label*="attach"], button[aria-label*="Upload"], button[aria-label*="Add file"], [data-testid*="attach"]');
                 if (attachButton) {
-
                     attachButton.click();
                     await new Promise(r => setTimeout(r, 500));
                 }
                 fileInput = document.querySelector('input[type="file"]');
+            } else if (host.includes('grok.com')) {
+                // Grok: Focus input and paste OR use file input if found
+                const inputArea = document.querySelector('textarea, [contenteditable="true"]');
+                if (inputArea) {
+                    inputArea.focus();
+                    inputArea.click();
+                }
+                
+                // Try file input first for Grok
+                fileInput = document.querySelector('input[type="file"]');
+                if (!fileInput) {
+                    // If no input, try clicking the attach/plus button
+                    attachButton = document.querySelector('button[aria-label*="Attach"], button[aria-label*="Add"], .attachments-button, [data-testid*="attach"]');
+                    if (attachButton) {
+                        attachButton.click();
+                        await new Promise(r => setTimeout(r, 800));
+                        fileInput = document.querySelector('input[type="file"]');
+                    }
+                }
             }
             
             // If no file input found, search all inputs
@@ -2759,6 +2994,76 @@ async function uploadFileToProvider(provider, filePath) {
 
 
     return uploadResult;
+}
+
+/**
+ * Downloads an image from a URL to a local path
+ */
+async function downloadImage(url, destPath) {
+    const https = require('https');
+    const fs = require('fs');
+    return new Promise((resolve, reject) => {
+        https.get(url, (res) => {
+            if (res.statusCode !== 200) {
+                reject(new Error(`Failed to download image: ${res.statusCode}`));
+                return;
+            }
+            const fileStream = fs.createWriteStream(destPath);
+            res.pipe(fileStream);
+            fileStream.on('finish', () => {
+                fileStream.close();
+                resolve();
+            });
+        }).on('error', (err) => {
+            reject(err);
+        });
+    });
+}
+
+/**
+ * Specialized automation to click the "Animate" button in Grok UI
+ */
+async function grokAnimateLatestImage() {
+    const webContents = browserManager.getWebContents('grok');
+    if (!webContents) throw new Error('Grok not initialized');
+
+    return await webContents.executeJavaScript(`
+        (async function() {
+            // 1. Try common selectors
+            const selectors = [
+                'button[aria-label*="Animate"]',
+                'button[aria-label*="video"]',
+                'button[aria-label*="동영상 만들기"]',
+                'button[aria-label*="Create Video"]',
+                '[data-testid="animate-button"]',
+                '.animate-icon-button'
+            ];
+            
+            for (const selector of selectors) {
+                const buttons = document.querySelectorAll(selector);
+                if (buttons.length > 0) {
+                    const lastBtn = buttons[buttons.length - 1];
+                    lastBtn.click();
+                    return { clicked: true, method: 'selector: ' + selector };
+                }
+            }
+            
+            // 2. Fallback: Search by text content
+            const allButtons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+            const textMatch = allButtons.reverse().find(b => {
+                const txt = (b.textContent || '').toLowerCase();
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                return txt.includes('animate') || txt.includes('video') || txt.includes('동영상') || aria.includes('동영상 만들기');
+            });
+            
+            if (textMatch) {
+                textMatch.click();
+                return { clicked: true, method: 'text-match' };
+            }
+            
+            return { clicked: false, error: 'Animate button not found on page' };
+        })()
+    `);
 }
 
 function getMimeType(filePath) {

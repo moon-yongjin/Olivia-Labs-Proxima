@@ -49,7 +49,7 @@ class Proxima {
      *
      * @param {string} message - Your message/prompt
      * @param {Object} [options] - Options
-     * @param {string} [options.model] - "chatgpt", "claude", "gemini", "perplexity", "auto"
+     * @param {string} [options.model] - "chatgpt", "claude", "gemini", "perplexity", "grok", "auto"
      * @param {string} [options.function] - "search", "translate", "brainstorm", "code", "analyze"
      *
      * Extra options based on function:

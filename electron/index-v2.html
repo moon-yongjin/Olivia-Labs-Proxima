@@ -153,6 +153,10 @@
             background: linear-gradient(135deg, #4285f4, #8ab4f8);
         }
 
+        .tab-icon.grok {
+            background: linear-gradient(135deg, #000000, #333333);
+        }
+
         .tab-icon.settings {
             background: transparent;
             border: none;
@@ -1010,6 +1014,11 @@
             <span class="tab-name">Gemini</span>
             <div class="tab-status offline" id="status-dot-gemini"></div>
         </div>
+        <div class="tab" data-provider="grok" onclick="switchTab('grok')">
+            <div class="tab-icon grok" style="background: #000; color: #fff;">𝕏</div>
+            <span class="tab-name">Grok</span>
+            <div class="tab-status offline" id="status-dot-grok"></div>
+        </div>
         <div class="tab-spacer"></div>
         <div class="tab" data-tab="settings" onclick="switchTab('settings')">
             <div class="tab-icon settings">⚙️</div>
@@ -1042,7 +1051,7 @@
                 <h1 class="welcome-title">Proxima</h1>
                 <p class="welcome-subtitle">
                     Free Multi-AI MCP Server<br>
-                    <span class="welcome-sub-light">No API keys required. Connect ChatGPT, Claude, Gemini & Perplexity
+                    <span class="welcome-sub-light">No API keys required. Connect ChatGPT, Claude, Gemini, Perplexity & Grok
                         locally.</span>
                 </p>
                 <div class="welcome-divider"></div>
@@ -1126,6 +1135,15 @@
                             <div class="provider-card-status not-ready" id="card-status-gemini">Not logged in</div>
                         </div>
                         <div class="toggle-switch active" data-provider="gemini" onclick="toggleProvider(this)"></div>
+                    </div>
+                    <!-- Grok -->
+                    <div class="provider-card enabled" data-provider="grok">
+                        <div class="provider-card-icon" style="background: #000; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; border-radius: 8px;">𝕏</div>
+                        <div class="provider-card-info">
+                            <div class="provider-card-name">Grok</div>
+                            <div class="provider-card-status not-ready" id="card-status-grok">Not logged in</div>
+                        </div>
+                        <div class="toggle-switch active" data-provider="grok" onclick="toggleProvider(this)"></div>
                     </div>
                 </div>
             </div>
