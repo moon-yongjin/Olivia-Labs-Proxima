@@ -873,14 +873,49 @@ class BrowserManager {
                                            !!document.querySelector('[contenteditable="true"]') ||
                                            !!document.querySelector('rich-textarea');
                             const hasSignIn = !!document.querySelector('a[href*="ServiceLogin"]') ||
-                                            !!document.querySelector('a[data-action-id="sign-in"]');
+                                             !!document.querySelector('a[data-action-id="sign-in"]');
                             return hasInput && !hasSignIn;
                         })()
+                    `);
+                case 'grok':
+                    return await webContents.executeJavaScript(`
+                        (function() {
+                            // Grok 로그인 체크 (2026년 기준 사장님 처방)
+                            const loggedInSelectors = [
+                                '[data-testid="user-menu"]',
+                                'img[src*="avatar"]',
+                                'button[aria-label*="Account"]',
+                                '.user-profile',
+                                '[href*="/profile"]'
+                            ];
+
+                            // 1. 로그인 표시 요소 확인
+                            for (const sel of loggedInSelectors) {
+                                if (document.querySelector(sel)) return true;
+                            }
+
+                            // 2. "Sign in" 또는 "로그인" 버튼이 없으면 로그인된 것으로 간주 (일부 페이지용)
+                            const buttons = Array.from(document.querySelectorAll('button, a'));
+                            const hasSignInBtn = buttons.some(b => {
+                                const text = b.innerText || '';
+                                return text.includes('Sign in') || text.includes('로그인') || (b.getAttribute('href') || '').includes('login');
+                            });
+                            if (!hasSignInBtn && (window.location.href.includes('grok') || window.location.href.includes('x.com'))) return true;
+
+                            // 3. 텍스트 기준 (Premium/Upgrade 버튼 등)
+                            const bodyText = document.body.innerText || '';
+                            if (bodyText.includes('Premium') || bodyText.includes('Upgrade')) {
+                                return true;
+                            }
+
+                            return false;
+                        })();
                     `);
                 default:
                     return false;
             }
         } catch (e) {
+            console.error(`[LoginCheckErr] ${provider}:`, e.message);
             return false;
         }
     }
@@ -888,10 +923,6 @@ class BrowserManager {
     openGoogleSignIn(provider) {
         // Open Google sign-in in auth popup window
         this.openAuthPopup(provider, 'https://accounts.google.com/ServiceLogin?continue=' + encodeURIComponent(this.providers[provider]?.url || 'https://google.com'));
-    }
-
-    getInitializedProviders() {
-        return Array.from(this.views.keys());
     }
 
     sleep(ms) {

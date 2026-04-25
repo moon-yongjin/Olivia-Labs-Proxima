@@ -465,6 +465,7 @@ async function handleMCPRequest(request) {
 
             case 'isLoggedIn':
                 const loggedIn = await browserManager.isLoggedIn(provider);
+                console.log(`[LoginCheck] ${provider} → LoggedIn: ${loggedIn}`); 
                 return { success: true, provider, loggedIn };
 
             case 'sendMessage':
@@ -624,57 +625,35 @@ async function handleMCPRequest(request) {
                 return { success: true, provider };
 
             case 'sendToImagine': {
-                // Navigate to Imagine tab, type prompt using OS-level input, and submit
+                // Simplified: Just use the current active Grok tab (could be chat or imagine)
+                // and use the standard executeScript to fire.
                 const imagineWC = browserManager.getWebContents('grok');
                 if (!imagineWC) return { success: false, error: 'Grok not initialized' };
 
-                try {
-                    // Step 1: Click Imagine menu (SPA nav — no full reload)
-                    await imagineWC.executeJavaScript(`
-                        (function() {
-                            const links = document.querySelectorAll('a[href*="imagine"], a[href="/imagine"]');
-                            if (links.length > 0) { links[0].click(); return 'link'; }
-                            const els = Array.from(document.querySelectorAll('a, div[role="button"]'));
-                            const m = els.find(el => (el.textContent || '').trim().includes('Imagine'));
-                            if (m) { m.click(); return 'text'; }
-                            return 'not found';
-                        })()
-                    `);
-                    await sleep(2000);
-
-                    // Step 2: Focus editor
-                    await imagineWC.executeJavaScript(`
-                        (function() {
-                            const editor = document.querySelector('.tiptap');
-                            if (editor) { editor.focus(); return 'focused'; }
-                            return 'no editor';
-                        })()
-                    `);
-                    await sleep(300);
-
-                    // Step 3: Paste via clipboard (avoids Server Fail from char-by-char typing)
-                    const { clipboard } = require('electron');
-                    clipboard.writeText(data.prompt);
-                    await sleep(100);
-
-                    // Select all existing text and paste
-                    await imagineWC.sendInputEvent({ type: 'keyDown', keyCode: 'A', modifiers: ['meta'] });
-                    await imagineWC.sendInputEvent({ type: 'keyUp', keyCode: 'A', modifiers: ['meta'] });
-                    await sleep(100);
-                    await imagineWC.sendInputEvent({ type: 'keyDown', keyCode: 'V', modifiers: ['meta'] });
-                    await imagineWC.sendInputEvent({ type: 'keyUp', keyCode: 'V', modifiers: ['meta'] });
-                    await sleep(500);
-
-                    // Step 4: Press Enter
-                    await imagineWC.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
-                    await imagineWC.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
-
-                    console.log('[sendToImagine] Prompt pasted via clipboard & Enter sent!');
-                    return { success: true, provider: 'grok', submitted: true };
-                } catch (e) {
-                    return { success: false, error: e.message };
-                }
-
+                const prompt = data.prompt.replace(/'/g, "\\'");
+                const script = `
+                    (function() {
+                        const input = document.querySelector("#prompt-textarea") || document.querySelector("div[contenteditable='true']");
+                        if (input) {
+                            input.focus();
+                            document.execCommand('insertText', false, '${prompt}');
+                            input.dispatchEvent(new Event('input', { bubbles: true }));
+                            setTimeout(() => {
+                                const btn = document.querySelector('[data-testid="send-button"]') || 
+                                           document.querySelector('button[aria-label*="Send"]') ||
+                                           Array.from(document.querySelectorAll('button')).find(b => b.innerHTML.includes('svg'));
+                                if (btn) {
+                                    btn.removeAttribute('disabled');
+                                    btn.click();
+                                }
+                            }, 500);
+                            return true;
+                        }
+                        return false;
+                    })();
+                `;
+                const result = await imagineWC.executeJavaScript(script);
+                return { success: result, provider: 'grok' };
             }
 
             case 'debugDOM':
@@ -1183,43 +1162,87 @@ async function sendToGemini(webContents, message) {
 async function sendToGrok(webContents, message) {
     console.log('[Grok] Sending message...');
 
-    // Step 1: Find and focus the input
-    const inputFound = await webContents.executeJavaScript(`
+    // 1. 강력 Focus
+    await webContents.executeJavaScript(`
         (function() {
             const selectors = [
                 'textarea[placeholder*="Grok"]',
                 'textarea[placeholder*="Ask"]',
+                'textarea',
                 '[contenteditable="true"]',
-                'textarea'
+                '[role="textbox"]'
             ];
-            
-            for (const selector of selectors) {
-                const input = document.querySelector(selector);
-                if (input) {
-                    input.focus();
-                    input.click();
-                    return { found: true, selector: selector };
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (el) {
+                    el.focus();
+                    el.click();
+                    el.scrollIntoView({ block: "center" });
+                    return sel;
                 }
             }
-            return { found: false };
-        })()
+            return 'no-input-found';
+        })();
     `);
 
-    if (!inputFound.found) {
-        return { sent: false, error: 'No input field found' };
-    }
-
     await sleep(300);
 
-    // Step 2: Use standard typing logic
+    // 2. 입력 (강화된 typeIntoPage 사용)
     await typeIntoPage(webContents, message);
+
+    await sleep(400);
+
+    // 3. **가장 강력한 Enter 보내기** (3가지 방법 동시에)
+    const sendResult = await webContents.executeJavaScript(`
+        (function() {
+            const input = document.activeElement;
+            let result = '';
+
+            // 방법 A: KeyboardEvent (가장 자연스러움)
+            if (input) {
+                const events = ['keydown', 'keypress', 'keyup'];
+                events.forEach(evType => {
+                    const e = new KeyboardEvent(evType, {
+                        key: 'Enter',
+                        code: 'Enter',
+                        keyCode: 13,
+                        which: 13,
+                        bubbles: true,
+                        cancelable: true
+                    });
+                    input.dispatchEvent(e);
+                });
+                result += 'keyboardEvent|';
+            }
+
+            // 방법 B: Send 버튼 강제 클릭
+            const btnSelectors = [
+                'button[aria-label*="Send"]',
+                'button[data-testid="send-button"]',
+                'button[type="submit"]',
+                'button:contains("Send")' // jQuery 없으면 아래로
+            ];
+            
+            let btnClicked = false;
+            for (const sel of ['button[aria-label*="Send"]', '[data-testid="send-button"]', 'button[type="submit"]']) {
+                const btn = document.querySelector(sel);
+                if (btn && !btn.disabled) {
+                    btn.removeAttribute('disabled');
+                    btn.click();
+                    btnClicked = true;
+                    result += 'buttonClicked|';
+                    break;
+                }
+            }
+
+            // 방법 C: Enter key simulation via sendInputEvent 백업
+            return result || 'fallback';
+        })();
+    `);
+
+    console.log(`[Grok] Send result: ${sendResult}`);
     await sleep(300);
 
-    // Step 3: Send with Enter key
-    await webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
-    await webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
-
-    console.log('[Grok] Enter key sent');
     return { sent: true };
 }
 
@@ -1285,46 +1308,46 @@ async function waitForSendButtonReady(provider) {
 }
 
 async function typeIntoPage(webContents, text) {
-    // SIMPLE & RELIABLE: Directly set value via JavaScript
-    // No clipboard permissions needed, works instantly
+    console.log(`[Type] Typing: ${text.substring(0, 50)}...`);
 
     await webContents.executeJavaScript(`
-        (function() {
-            const text = ${JSON.stringify(text)};
-            const active = document.activeElement;
-            
-            if (active) {
-                if (active.contentEditable === 'true') {
-                    // ContentEditable (Claude, Gemini)
-                    active.innerText = text;
-                    active.dispatchEvent(new Event('input', { bubbles: true }));
-                } else if (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT') {
-                    // Textarea/Input (ChatGPT, Perplexity)
-                    active.value = text;
-                    active.dispatchEvent(new Event('input', { bubbles: true }));
+        (function(text) {
+            let input = document.activeElement;
+
+            // 강제 input 찾기
+            if (!input || !['TEXTAREA','INPUT'].includes(input.tagName) && input.contentEditable !== 'true') {
+                const selectors = ['textarea', '#prompt-textarea', '[contenteditable="true"]', '[role="textbox"]', '.tiptap'];
+                for (const s of selectors) {
+                    input = document.querySelector(s);
+                    if (input) break;
                 }
             }
-            
-            // Also try by selector as backup
-            const textarea = document.querySelector('#prompt-textarea') || 
-                           document.querySelector('textarea[placeholder*="Ask"]') ||
-                           document.querySelector('textarea');
-            if (textarea && !textarea.value) {
-                textarea.value = text;
-                textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+            if (!input) return false;
+
+            input.focus();
+            input.click();
+
+            if (input.contentEditable === 'true' || input.isContentEditable) {
+                input.innerText = text;
+            } else {
+                input.value = text;
             }
-            
-            const contentEditable = document.querySelector('[contenteditable="true"]');
-            if (contentEditable && !contentEditable.innerText.trim()) {
-                contentEditable.innerText = text;
-                contentEditable.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-        })()
+
+            // 이벤트 3연타
+            ['input', 'change', 'keydown', 'keyup'].forEach(ev => {
+                input.dispatchEvent(new Event(ev, { bubbles: true }));
+            });
+
+            setTimeout(() => { if (input) input.focus(); }, 30);
+            return true;
+        })(${JSON.stringify(text)});
     `);
 
-    // Small delay for UI to update
-    await sleep(100);
+    await sleep(250);
 }
+
+
 
 async function getResponseWithTypingStatus(provider) {
     console.log(`[getResponseWithTyping] Starting for ${provider}...`);
@@ -2912,7 +2935,7 @@ async function uploadFileToProvider(provider, filePath) {
                     await new Promise(r => setTimeout(r, 500));
                 }
                 fileInput = document.querySelector('input[type="file"]');
-            } else if (host.includes('grok.com')) {
+            } else if (host.includes('grok.com') || (host.includes('x.com') && window.location.pathname.includes('/grok'))) {
                 // Grok: Focus input and paste OR use file input if found
                 const inputArea = document.querySelector('textarea, [contenteditable="true"]');
                 if (inputArea) {
