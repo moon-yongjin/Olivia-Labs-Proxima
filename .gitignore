@@ -40,3 +40,22 @@ env/
 dist/
 build/
 out/
+
+# Tests and Experiments (Archived)
+archive/
+slam_dunk*
+test_*
+disney*
+cinematic*
+prompt_vault*
+*_fixed.py
+*_v2.py
+*_reset.py
+dump_grok*
+check_all*
+debug_*
+scratch_*
+*.img
+*.jpg
+*.png
+!assets/
