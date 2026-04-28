@@ -1,6 +1,6 @@
 {
     "name": "proxima",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "description": "Proxima - Local MCP Server (requires localhost network access for AI coding tools)",
     "license": "SEE LICENSE IN LICENSE",
     "author": "Zen4-bit",
@@ -16,6 +16,9 @@
     ],
     "type": "module",
     "main": "electron/main-v2.cjs",
+    "bin": {
+        "proxima": "cli.js"
+    },
     "scripts": {
         "start": "electron .",
         "mcp": "node src/mcp-server-v3.js",

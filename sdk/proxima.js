@@ -179,7 +179,10 @@ class Proxima {
     }
 }
 
-// Export for Node.js
+// Export for Node.js (CommonJS)
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { Proxima, ProximaResponse };
 }
+
+// Export for ESM
+export { Proxima, ProximaResponse };

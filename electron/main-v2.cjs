@@ -1160,35 +1160,71 @@ async function sendToGemini(webContents, message) {
 }
 
 async function sendToGrok(webContents, message) {
-    console.log('[Grok] Sending message...');
+    // 0. Advanced Auto-closer (ESC + Hidden Banner Fix)
+    await webContents.executeJavaScript(`
+        (async function() {
+            const escEvent = new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, which: 27, bubbles: true });
+            document.dispatchEvent(escEvent);
+            
+            const badKeywords = ['Upgrade', 'SuperGrok', '업그레이드', '구독'];
+            const allElements = document.querySelectorAll('div[style*="fixed"], div[style*="absolute"], [role="dialog"], [id*="modal"]');
+            
+            allElements.forEach(el => {
+                const text = el.textContent || '';
+                if (badKeywords.some(kw => text.includes(kw))) {
+                    el.style.setProperty('display', 'none', 'important');
+                    el.style.setProperty('pointer-events', 'none', 'important');
+                }
+            });
 
-    // 1. 강력 Focus
+            const selectors = [
+                '#onetrust-accept-btn-handler', '.onetrust-close-btn-handler', 
+                'button[aria-label="Close"]', '.modal-close', '.close-button',
+                '[data-testid="close-button"]'
+            ];
+            selectors.forEach(sel => {
+                const el = document.querySelector(sel);
+                if (el) el.click();
+            });
+        })()
+    `).catch(() => {});
+
+    await sleep(800);
+
+    console.log('[Grok] Sending message with re-focus...');
+
+    // 1. Focus the input area
     await webContents.executeJavaScript(`
         (function() {
-            const selectors = [
-                'textarea[placeholder*="Grok"]',
-                'textarea[placeholder*="Ask"]',
-                'textarea',
-                '[contenteditable="true"]',
-                '[role="textbox"]'
-            ];
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el) {
-                    el.focus();
-                    el.click();
-                    el.scrollIntoView({ block: "center" });
-                    return sel;
-                }
+            const input = document.querySelector('rich-textarea, .ql-editor, [contenteditable="true"], textarea');
+            if (input) {
+                input.focus();
+                input.click();
+                return 'focused';
             }
-            return 'no-input-found';
-        })();
+            return 'not-found';
+        })()
     `);
 
-    await sleep(300);
-
-    // 2. 입력 (강화된 typeIntoPage 사용)
-    await typeIntoPage(webContents, message);
+    // 2. 입력 (Grok Tiptap 전용 직접 주입 로직)
+    await webContents.executeJavaScript(`
+        (function() {
+            const input = document.querySelector('.tiptap, [contenteditable="true"]');
+            if (input) {
+                // 직접 텍스트 노드 수정 (에디터 상태 강제 업데이트)
+                input.focus();
+                document.execCommand('insertText', false, '${message.replace(/'/g, "\\'")}');
+                
+                // 이벤트 발생시켜 에디터에게 알림
+                const events = ['input', 'change', 'blur'];
+                events.forEach(type => {
+                    input.dispatchEvent(new Event(type, { bubbles: true }));
+                });
+                return 'injected';
+            }
+            return 'not-found';
+        })()
+    `);
 
     await sleep(400);
 
@@ -1224,7 +1260,7 @@ async function sendToGrok(webContents, message) {
             ];
             
             let btnClicked = false;
-            for (const sel of ['button[aria-label*="Send"]', '[data-testid="send-button"]', 'button[type="submit"]']) {
+            for (const sel of ['button[aria-label*="Send"]', 'button[aria-label*="제출"]', 'button[aria-label*="전송"]', '[data-testid="send-button"]', 'button[type="submit"]']) {
                 const btn = document.querySelector(sel);
                 if (btn && !btn.disabled) {
                     btn.removeAttribute('disabled');
@@ -1433,7 +1469,8 @@ async function getResponseWithTypingStatus(provider) {
         } else if (provider === 'grok') {
             const oldFp = await webContents.executeJavaScript(`
                 (function() {
-                    const msgs = document.querySelectorAll('[data-testid="message-row"], [class*="message-content"], .prose');
+                    const msgs = Array.from(document.querySelectorAll('[data-testid="message-row"], [class*="message-content"], .prose'))
+                        .filter(el => !el.classList.contains('tiptap') && !el.closest('.tiptap'));
                     if (msgs.length > 0) {
                         return msgs[msgs.length - 1].textContent.substring(0, 200).trim();
                     }
@@ -2176,7 +2213,8 @@ async function getProviderResponse(provider, customSelector = null) {
                     }
                     
                     // Fallback to any prose/markdown in the main area
-                    const contents = document.querySelectorAll('.prose, .markdown, [class*="message-content"]');
+                    const contents = Array.from(document.querySelectorAll('.prose, .markdown, [class*="message-content"]'))
+                        .filter(el => !el.classList.contains('tiptap') && !el.closest('.tiptap'));
                     if (contents.length > 0) {
                         const lastContent = contents[contents.length - 1];
                         return cleanMarkdown(domToMarkdown(lastContent));
@@ -2888,8 +2926,22 @@ async function uploadFileToProvider(provider, filePath) {
                 // Gemini: Use clipboard paste (Ctrl+V) since no hidden file input exists
 
                 
-                // Focus the input area first
-                const inputArea = document.querySelector('rich-textarea, .ql-editor, [contenteditable="true"], textarea');
+                // 0. Auto-close common banners/modals (OneTrust, etc.)
+            await webContents.executeJavaScript(\`
+                (function() {
+                    const selectors = [
+                        '#onetrust-accept-btn-handler', '.onetrust-close-btn-handler', 
+                        'button[aria-label="Close"]', '.modal-close', '.close-button'
+                    ];
+                    selectors.forEach(sel => {
+                        const el = document.querySelector(sel);
+                        if (el) el.click();
+                    });
+                })()
+            \`).catch(() => {});
+
+            // 1. Find the input area
+            const inputArea = document.querySelector('rich-textarea, .ql-editor, [contenteditable="true"], textarea');
                 if (inputArea) {
                     inputArea.focus();
                     inputArea.click();
